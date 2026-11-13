@@ -1,0 +1,73 @@
+name: Sync MobileGlues submodule
+
+# Polls MobileGL-Dev/MobileGlues (the "mg" submodule at app/src/main/mg) for new
+# commits on its "main" branch. If it's moved on since our pinned commit, this
+# updates the submodule pointer and pushes to master — which triggers
+# build-aar.yml automatically via its own `push` trigger.
+#
+# GitHub Actions can't subscribe to another repo's push events unless that repo
+# sends us a repository_dispatch/webhook, and we don't control MobileGlues, so
+# polling on a schedule is the reliable option here.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # once a day, 03:00 UTC
+  workflow_dispatch: {}   # manual "check now" button
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: https://github.com/MobileGL-Dev/MobileGlues
+  UPSTREAM_BRANCH: main
+  SUBMODULE_PATH: app/src/main/mg
+
+jobs:
+  check-and-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout MobileGlues-AAR
+        uses: actions/checkout@v4
+        with:
+          submodules: false   # we only need the gitlink, not the submodule content
+          fetch-depth: 1
+
+      - name: Compare pinned commit vs upstream HEAD
+        id: check
+        run: |
+          set -e
+          current=$(git ls-tree HEAD "$SUBMODULE_PATH" | awk '{print $3}')
+          latest=$(git ls-remote "$UPSTREAM_REPO" "refs/heads/$UPSTREAM_BRANCH" | cut -f1)
+
+          echo "Pinned:  $current"
+          echo "Latest:  $latest"
+
+          if [ -z "$latest" ]; then
+            echo "Could not resolve upstream HEAD, skipping." >&2
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          elif [ "$current" != "$latest" ]; then
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+            echo "latest_sha=$latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update submodule pointer
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          set -e
+          git submodule update --init "$SUBMODULE_PATH"
+          cd "$SUBMODULE_PATH"
+          git fetch origin "$UPSTREAM_BRANCH" --depth 1
+          git checkout "${{ steps.check.outputs.latest_sha }}"
+
+      - name: Commit and push
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$SUBMODULE_PATH"
+          short_sha="${{ steps.check.outputs.latest_sha }}"
+          git commit -m "chore(submodule): sync MobileGlues to ${short_sha:0:7}"
+          git push origin HEAD:master

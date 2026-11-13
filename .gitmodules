@@ -1,0 +1,3 @@
+[submodule "app/src/main/mg"]
+	path = app/src/main/mg
+	url = https://github.com/whaltermc/MobileGlues

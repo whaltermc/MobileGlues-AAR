@@ -1,0 +1,102 @@
+name: Build AAR
+
+# Builds app/src/main as an AAR. Runs whenever master changes (including the
+# automated submodule-sync commits from sync-submodule.yml), on PRs for
+# validation, and on manual dispatch.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  NDK_VERSION: "27.2.12479018"
+  CMAKE_VERSION: "3.22.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+          fetch-depth: 0
+
+      - name: Get MobileGlues submodule SHA
+        id: mg
+        run: |
+          sha=$(git -C app/src/main/mg rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v3
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Set up Android SDK command-line tools
+        run: |
+          set -e
+          SDK_DIR="$HOME/android-sdk"
+          mkdir -p "$SDK_DIR/cmdline-tools"
+          cd "$SDK_DIR/cmdline-tools"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o cmdline-tools.zip
+          unzip -q cmdline-tools.zip
+          mv cmdline-tools latest
+          rm cmdline-tools.zip
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "$SDK_DIR/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
+      - name: Install Android platforms & build tools
+        run: |
+          set -e
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+      - name: Install NDK & CMake
+        run: |
+          set -e
+          sdkmanager --install "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          validate-wrappers: false
+
+      - name: Build release AAR
+        run: |
+          ./gradlew :app:assembleRelease \
+            -Pandroid.ndkVersion="$NDK_VERSION" \
+            -Pandroid.cmake.version="$CMAKE_VERSION"
+
+      - name: Collect output
+        run: |
+          set -e
+          mkdir -p out
+          aar=$(find app/build/outputs/aar -name "*.aar" | head -n1)
+          cp "$aar" "out/mobileglues-${{ steps.mg.outputs.short_sha }}.aar"
+          ( cd out && md5sum *.aar > mobileglues-${{ steps.mg.outputs.short_sha }}.aar.md5 )
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobileglues-aar
+          path: out/*
+
+      - name: Create release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: mg-${{ steps.mg.outputs.short_sha }}
+          name: MobileGlues ${{ steps.mg.outputs.short_sha }}
+          body: |
+            Auto-built from MobileGL-Dev/MobileGlues@${{ steps.mg.outputs.sha }}
+          files: out/*
